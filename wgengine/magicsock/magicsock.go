@@ -181,6 +181,7 @@ type Conn struct {
 	syncPub               *eventbus.Publisher[syncPoint]
 	allocRelayEndpointPub *eventbus.Publisher[UDPRelayAllocReq]
 	portUpdatePub         *eventbus.Publisher[router.PortUpdate]
+	tsmpSendPub           *eventbus.Publisher[SendTSMPDiscoAdvertisement]
 
 	// pconn4 and pconn6 are the underlying UDP sockets used to
 	// send/receive packets for wireguard and other magicsock
@@ -691,6 +692,7 @@ func NewConn(opts Options) (*Conn, error) {
 	c.syncPub = eventbus.Publish[syncPoint](ec)
 	c.allocRelayEndpointPub = eventbus.Publish[UDPRelayAllocReq](ec)
 	c.portUpdatePub = eventbus.Publish[router.PortUpdate](ec)
+	c.tsmpSendPub = eventbus.Publish[SendTSMPDiscoAdvertisement](ec)
 	eventbus.SubscribeFunc(ec, c.onPortMapChanged)
 	eventbus.SubscribeFunc(ec, c.onFilterUpdate)
 	eventbus.SubscribeFunc(ec, c.onNodeViewsUpdate)
@@ -2646,6 +2648,11 @@ func (c *Conn) enqueueCallMeMaybe(derpAddr netip.AddrPort, de *endpoint) {
 		return
 	}
 
+	if de.LastTSMPDiscoAdvertisement == 0 {
+		c.sendTSMPDiscoAdvert(de.nodeAddr)
+		de.LastTSMPDiscoAdvertisement = mono.Now()
+	}
+
 	eps := make([]netip.AddrPort, 0, len(c.lastEndpoints))
 	for _, ep := range c.lastEndpoints {
 		eps = append(eps, ep.Addr)
@@ -4305,4 +4312,14 @@ func (c *Conn) HandleDiscoKeyAdvertisement(node tailcfg.NodeView, update packet.
 	c.peerMap.upsertEndpoint(ep, oldDiscoKey)
 	c.logf("magicsock: updated disco key for peer %v to %v", nodeKey.ShortString(), discoKey.ShortString())
 	metricTSMPDiscoKeyAdvertisementApplied.Add(1)
+}
+
+type SendTSMPDiscoAdvertisement struct {
+	EpAddr netip.Addr
+}
+
+func (c *Conn) sendTSMPDiscoAdvert(addr netip.Addr) {
+	c.tsmpSendPub.Publish(SendTSMPDiscoAdvertisement{
+		EpAddr: addr,
+	})
 }
