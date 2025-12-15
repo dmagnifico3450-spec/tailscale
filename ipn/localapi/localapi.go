@@ -1284,9 +1284,12 @@ func (h *Handler) serveUploadClientMetrics(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	type clientMetricJSON struct {
-		Name  string `json:"name"`
-		Type  string `json:"type"`  // one of "counter" or "gauge"
-		Value int    `json:"value"` // amount to increment metric by
+		Name string `json:"name"`
+		Type string `json:"type"` // one of "counter" or "gauge"
+
+		// Only one of Value or SetValue should be used.
+		Value    *int `json:"value,omitzero"`    // amount to increment metric by
+		SetValue *int `json:"setValue,omitzero"` // value to set for metric
 	}
 
 	var clientMetrics []clientMetricJSON
@@ -1300,7 +1303,11 @@ func (h *Handler) serveUploadClientMetrics(w http.ResponseWriter, r *http.Reques
 
 	for _, m := range clientMetrics {
 		if metric, ok := metrics[m.Name]; ok {
-			metric.Add(int64(m.Value))
+			if m.Value != nil {
+				metric.Add(int64(*m.Value))
+			} else if m.SetValue != nil {
+				metric.Set(int64(*m.SetValue))
+			}
 		} else {
 			if clientmetric.HasPublished(m.Name) {
 				http.Error(w, "Already have a metric named "+m.Name, http.StatusBadRequest)
@@ -1317,7 +1324,11 @@ func (h *Handler) serveUploadClientMetrics(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			metrics[m.Name] = metric
-			metric.Add(int64(m.Value))
+			if m.Value != nil {
+				metric.Add(int64(*m.Value))
+			} else if m.SetValue != nil {
+				metric.Set(int64(*m.Value))
+			}
 		}
 	}
 

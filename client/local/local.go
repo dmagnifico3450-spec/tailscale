@@ -376,6 +376,17 @@ func (lc *Client) UserMetrics(ctx context.Context) ([]byte, error) {
 	return lc.get200(ctx, "/localapi/v0/usermetrics")
 }
 
+// metricUpdate requests that a client metric value be updated.
+// Only one of Value or SetValue should be set.
+//
+// This is the request body sent to /localapi/v0/upload-client-metrics.
+type metricUpdate struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Value    *int   `json:"value,omitzero"`    // amount to increment by
+	SetValue *int   `json:"setValue,omitzero"` // value to set for metric
+}
+
 // IncrementCounter increments the value of a Tailscale daemon's counter
 // metric by the given delta. If the metric has yet to exist, a new counter
 // metric is created and initialized to delta.
@@ -385,18 +396,13 @@ func (lc *Client) IncrementCounter(ctx context.Context, name string, delta int) 
 	if !buildfeatures.HasClientMetrics {
 		return nil
 	}
-	type metricUpdate struct {
-		Name  string `json:"name"`
-		Type  string `json:"type"`
-		Value int    `json:"value"` // amount to increment by
-	}
 	if delta < 0 {
 		return errors.New("negative delta not allowed")
 	}
 	_, err := lc.send(ctx, "POST", "/localapi/v0/upload-client-metrics", 200, jsonBody([]metricUpdate{{
 		Name:  name,
 		Type:  "counter",
-		Value: delta,
+		Value: &delta,
 	}}))
 	return err
 }
@@ -405,15 +411,21 @@ func (lc *Client) IncrementCounter(ctx context.Context, name string, delta int) 
 // metric by the given delta. If the metric has yet to exist, a new gauge
 // metric is created and initialized to delta. The delta value can be negative.
 func (lc *Client) IncrementGauge(ctx context.Context, name string, delta int) error {
-	type metricUpdate struct {
-		Name  string `json:"name"`
-		Type  string `json:"type"`
-		Value int    `json:"value"` // amount to increment by
-	}
 	_, err := lc.send(ctx, "POST", "/localapi/v0/upload-client-metrics", 200, jsonBody([]metricUpdate{{
 		Name:  name,
 		Type:  "gauge",
-		Value: delta,
+		Value: &delta,
+	}}))
+	return err
+}
+
+// SetGauge sets the value of a Tailscale daemon's gauge metric to the given value.
+// If the metric has yet to exist, a new gauge metric is created and initialized to value.
+func (lc *Client) SetGauge(ctx context.Context, name string, value int) error {
+	_, err := lc.send(ctx, "POST", "/localapi/v0/upload-client-metrics", 200, jsonBody([]metricUpdate{{
+		Name:     name,
+		Type:     "gauge",
+		SetValue: &value,
 	}}))
 	return err
 }
