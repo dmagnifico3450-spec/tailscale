@@ -43,6 +43,7 @@ import (
 	"tailscale.com/types/views"
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/set"
+	"tailscale.com/util/usermetric"
 )
 
 const (
@@ -76,6 +77,7 @@ type Server struct {
 	wg                  sync.WaitGroup
 	closeCh             chan struct{}
 	netChecker          *netcheck.Client
+	metrics             *metrics
 
 	mu                  sync.Mutex           // guards the following fields
 	macSecrets          [][blake2s.Size]byte // [0] is most recent, max 2 elements
@@ -311,7 +313,7 @@ func (e *serverEndpoint) isBound() bool {
 // onlyStaticAddrPorts is true, then dynamic addr:port discovery will be
 // disabled, and only addr:port's set via [Server.SetStaticAddrPorts] will be
 // used.
-func NewServer(logf logger.Logf, port uint16, onlyStaticAddrPorts bool) (s *Server, err error) {
+func NewServer(logf logger.Logf, port uint16, onlyStaticAddrPorts bool, metrics *usermetric.Registry) (s *Server, err error) {
 	s = &Server{
 		logf:                logf,
 		disco:               key.NewDisco(),
@@ -324,6 +326,7 @@ func NewServer(logf logger.Logf, port uint16, onlyStaticAddrPorts bool) (s *Serv
 		byVNI:               make(map[uint32]*serverEndpoint),
 	}
 	s.discoPublic = s.disco.Public()
+	s.metrics = registerMetrics(metrics)
 
 	// TODO(creachadair): Find a way to plumb this in during initialization.
 	// As-written, messages published here will not be seen by other components
@@ -678,16 +681,20 @@ func (s *Server) endpointGCLoop() {
 }
 
 func (s *Server) handlePacket(from netip.AddrPort, b []byte) (write []byte, to netip.AddrPort) {
+	is4 := from.Addr().Is4()
+	bytesRx := int64(len(b))
 	if stun.Is(b) && b[1] == 0x01 {
 		// A b[1] value of 0x01 (STUN method binding) is sufficiently
 		// non-overlapping with the Geneve header where the LSB is always 0
 		// (part of 6 "reserved" bits).
 		s.netChecker.ReceiveSTUNPacket(b, from)
+		s.metrics.countSTUN(is4, bytesRx)
 		return nil, netip.AddrPort{}
 	}
 	gh := packet.GeneveHeader{}
 	err := gh.Decode(b)
 	if err != nil {
+		s.metrics.countNonGeneve(is4, bytesRx)
 		return nil, netip.AddrPort{}
 	}
 	// TODO: consider performance implications of holding s.mu for the remainder
@@ -698,6 +705,7 @@ func (s *Server) handlePacket(from netip.AddrPort, b []byte) (write []byte, to n
 	e, ok := s.byVNI[gh.VNI.Get()]
 	if !ok {
 		// unknown VNI
+		s.metrics.countUnknownVNI(is4, bytesRx)
 		return nil, netip.AddrPort{}
 	}
 
@@ -705,13 +713,24 @@ func (s *Server) handlePacket(from netip.AddrPort, b []byte) (write []byte, to n
 	if gh.Control {
 		if gh.Protocol != packet.GeneveProtocolDisco {
 			// control packet, but not Disco
+			s.metrics.countUnknownControl(is4, bytesRx)
 			return nil, netip.AddrPort{}
 		}
 		msg := b[packet.GeneveFixedHeaderLength:]
 		s.maybeRotateMACSecretLocked(now)
-		return e.handleSealedDiscoControlMsg(from, msg, s.discoPublic, s.macSecrets, now)
+		write, to = e.handleSealedDiscoControlMsg(from, msg, s.discoPublic, s.macSecrets, now)
+		if write == nil {
+			s.metrics.countDiscoMalformed(is4, bytesRx)
+		}
+		s.metrics.countDiscoRx(is4, bytesRx)
+		return
 	}
-	return e.handleDataPacket(from, b, now)
+	write, to = e.handleDataPacket(from, b, now)
+	if write == nil {
+		s.metrics.countDataMalformed(is4, bytesRx)
+	}
+	s.metrics.countDataRelayed(is4, bytesRx)
+	return
 }
 
 func (s *Server) maybeRotateMACSecretLocked(now mono.Time) {
@@ -955,7 +974,7 @@ func (s *Server) GetSessions() []status.ServerSession {
 	if s.closed {
 		return nil
 	}
-	var sessions = make([]status.ServerSession, 0, len(s.byDisco))
+	sessions := make([]status.ServerSession, 0, len(s.byDisco))
 	for _, se := range s.byDisco {
 		c1 := extractClientInfo(0, se)
 		c2 := extractClientInfo(1, se)
